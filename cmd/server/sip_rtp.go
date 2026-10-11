@@ -161,6 +161,7 @@ func (b *SIPRTPBridge) LocalPort() int {
 // readLoop recebe RTP do softphone, decodifica PCMU -> float32 16kHz e injeta imediatamente.
 func (b *SIPRTPBridge) readLoop() {
 	buf := make([]byte, 1500)
+	var lastIn float32 // última amostra do pacote anterior, para interpolar na emenda
 	for {
 		select {
 		case <-b.closeChan:
@@ -195,8 +196,9 @@ func (b *SIPRTPBridge) readLoop() {
 			for _, u := range packet.Payload {
 				s := ulawToLinear(u)
 				fs := float32(s) / 32768.0
-				// 8k -> 16k na proporção 1:2 (duplicação simples de amostra).
-				pcm = append(pcm, fs, fs)
+				// 8k -> 16k com interpolação linear: duplicar a amostra deixava a voz metalizada.
+				pcm = append(pcm, (lastIn+fs)/2, fs)
+				lastIn = fs
 			}
 
 			// Injeta imediatamente no encoder do WhatsApp, que tem o próprio timer.
