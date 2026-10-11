@@ -454,7 +454,12 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		s.mgr.broker.emitIncoming(s.id, c.CallID, peerOut, phone, name, c.MediaType == core.CallMediaTypeVideo)
 		// se um tronco SIP está registrado, toca essa chamada no ramal também.
 		if s.mgr.sipInbound != nil {
-			s.mgr.sipInbound(s, c.CallID, sipUserPart(c.PeerJid))
+			// caller ID no ramal = telefone real; o LID só quando não há como resolver
+			sipPeer := phone
+			if sipPeer == "" {
+				sipPeer = sipUserPart(c.PeerJid)
+			}
+			s.mgr.sipInbound(s, c.CallID, sipPeer)
 		}
 	}
 	cm.OnStateChange = func(c *call.CallInfo) {
