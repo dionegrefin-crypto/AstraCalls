@@ -55,6 +55,7 @@ type SessionInfo struct {
 	SIPExtUser    string `json:"sip_ext_user"`
 	SIPExtPass    string `json:"sip_ext_pass"`
 	SIPExtDest    string `json:"sip_ext_dest"`
+	SIPExtProxy   string `json:"sip_ext_proxy"`
 	SIPExtStatus  string `json:"sip_ext_status"`
 	SIPExtError   string `json:"sip_ext_error"`
 }
@@ -332,11 +333,20 @@ func (b *Broker) emitIncoming(sessionID, id, peer, phone, name string, video boo
 
 // emitVideoState avisa a UI sobre negociação de vídeo mid-call (pedido de upgrade,
 // câmera do peer ligada/desligada, etc.). Escopado por conta como as chamadas.
-func (b *Broker) emitVideoState(sessionID, id, kind string, peerVideo, localVideo, upgradeIncoming, upgradeOutgoing bool) {
+func (b *Broker) emitVideoState(sessionID, id, kind string, peerVideo, localVideo, upgradeIncoming, upgradeOutgoing bool, peerOrientation int) {
 	b.broadcastForSession(sessionID, map[string]any{
 		"type": "video-state", "sessionId": sessionID, "id": id, "kind": kind,
 		"peerVideo": peerVideo, "localVideo": localVideo,
 		"upgradeIncoming": upgradeIncoming, "upgradeOutgoing": upgradeOutgoing,
+		"peerOrientation": peerOrientation, // rotação da câmera do peer (0..3, quartos de volta)
+	})
+}
+
+// emitCallAction avisa o painel/widget de uma ação mid-call portada do zapo
+// (kind: "peer-mute" | "peer-hand"), com o estado booleano anunciado pelo peer.
+func (b *Broker) emitCallAction(sessionID, id, kind string, state bool) {
+	b.broadcastForSession(sessionID, map[string]any{
+		"type": "call-action", "sessionId": sessionID, "id": id, "kind": kind, "state": state,
 	})
 }
 
@@ -359,6 +369,22 @@ func (b *Broker) subscriberScope(sessionID string) (acct, total, matched, widget
 		matched++
 	}
 	return
+}
+
+// emitCallVolume avisa as UIs que o ganho do áudio da chamada mudou (POST /volume),
+// para o controle de volume ficar sincronizado entre painel/widgets.
+func (b *Broker) emitCallVolume(sessionID, id string, level float64) {
+	b.broadcastForSession(sessionID, map[string]any{
+		"type": "call-volume", "sessionId": sessionID, "id": id, "level": level,
+	})
+}
+
+// emitCallSpy avisa que alguém começou/parou de espiar a chamada (count = nº de
+// ouvintes). Mesmo formato do call-action (kind=spy, state = tem alguém ouvindo).
+func (b *Broker) emitCallSpy(sessionID, id string, count int) {
+	b.broadcastForSession(sessionID, map[string]any{
+		"type": "call-action", "sessionId": sessionID, "id": id, "kind": "spy", "state": count > 0, "count": count,
+	})
 }
 
 func (b *Broker) emitIncomingClaimed(sessionID, id, owner string) {

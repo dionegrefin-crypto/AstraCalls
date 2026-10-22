@@ -28,6 +28,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.handleSessionList)
 	mux.HandleFunc("POST /api/sessions", s.handleSessionCreate)
 	mux.HandleFunc("GET /api/sessions/{sid}/calls", s.handleSessionCalls)
+	mux.HandleFunc("GET /api/sessions/{sid}/restriction-status", s.handleRestrictionStatus)
 	mux.HandleFunc("DELETE /api/sessions/{sid}", s.handleSessionDelete)
 	mux.HandleFunc("POST /api/sessions/{sid}/logout", s.handleSessionLogout)
 	mux.HandleFunc("POST /api/sessions/{sid}/pair", s.handleSessionPair)
@@ -35,6 +36,11 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/pair-passkey", s.handlePairPasskey)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls", s.handleStartCall)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/fake", s.handleFakeCall)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/group", s.handleStartGroupCall)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/group/end", s.handleEndGroupCall)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/group/ws", s.handleGroupWSBridge)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/group/video-ws", s.handleGroupVideoWS)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/group/roster", s.handleGroupRoster)
 
 	// Gateway SIP (modelo Wavoip): status global e credenciais por sessão.
 	mux.HandleFunc("GET /api/sip/status", s.handleSIPStatus)
@@ -52,6 +58,16 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/video/{action}", s.handleCallVideo)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/hold", s.handleHold)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/resume", s.handleResume)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/mute", s.handleCallMute)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/hand", s.handleCallHand)
+	// espiar (escuta em tempo real), volume e silenciar o toque — ver spy.go
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/spy", s.handleSpyWebRTC)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/{id}/spy", s.handleSpyList)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/{id}/spy/ws", s.handleSpyWS)
+	mux.HandleFunc("DELETE /api/sessions/{sid}/calls/{id}/spy/{spyId}", s.handleSpyDelete)
+	mux.HandleFunc("GET /api/sessions/{sid}/calls/{id}/volume", s.handleCallVolume)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/volume", s.handleCallVolume)
+	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/silence", s.handleCallSilence)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/transfer", s.handleTransfer)
 	mux.HandleFunc("POST /api/sessions/{sid}/calls/{id}/pickup", s.handlePickup)
 	mux.HandleFunc("DELETE /api/sessions/{sid}/calls/{id}", s.handleEndCall)
@@ -71,6 +87,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/interactive", s.handleSendInteractive)
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/carousel", s.handleSendCarousel)
 	mux.HandleFunc("POST /api/sessions/{sid}/messages/form", s.handleSendForm)
+	mux.HandleFunc("POST /api/sessions/{sid}/messages/native-form", s.handleSendNativeForm)
+	mux.HandleFunc("GET /api/sessions/{sid}/native-forms", s.handleListNativeForms)
 	mux.HandleFunc("POST /api/sessions/{sid}/schedule", s.handleSchedule)
 	mux.HandleFunc("GET /api/sessions/{sid}/schedule", s.handleListScheduled)
 	mux.HandleFunc("DELETE /api/sessions/{sid}/schedule/{id}", s.handleCancelScheduled)
@@ -101,6 +119,15 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{sid}/blocklist", s.handleBlocklist)
 
 	// Grupos (whatsmeow)
+	mux.HandleFunc("POST /api/sessions/{sid}/communities", s.handleCreateCommunity)
+	mux.HandleFunc("GET /api/sessions/{sid}/communities", s.handleListCommunities)
+	mux.HandleFunc("GET /api/sessions/{sid}/communities/{cid}", s.handleCommunityInfo)
+	mux.HandleFunc("GET /api/sessions/{sid}/communities/{cid}/groups", s.handleCommunityGroups)
+	mux.HandleFunc("POST /api/sessions/{sid}/communities/{cid}/groups", s.handleCommunityCreateGroup)
+	mux.HandleFunc("POST /api/sessions/{sid}/communities/{cid}/groups/link", s.handleCommunityLink(true))
+	mux.HandleFunc("POST /api/sessions/{sid}/communities/{cid}/groups/unlink", s.handleCommunityLink(false))
+	mux.HandleFunc("GET /api/sessions/{sid}/communities/{cid}/participants", s.handleCommunityParticipants)
+	mux.HandleFunc("POST /api/sessions/{sid}/communities/{cid}/participants/add", s.handleCommunityAddParticipants)
 	mux.HandleFunc("POST /api/sessions/{sid}/groups", s.handleCreateGroup)
 	mux.HandleFunc("GET /api/sessions/{sid}/groups", s.handleListGroups)
 	mux.HandleFunc("POST /api/sessions/{sid}/groups/join", s.handleJoinGroup)
@@ -108,6 +135,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{sid}/groups/{gid}", s.handleGroupInfo)
 	mux.HandleFunc("POST /api/sessions/{sid}/groups/{gid}/leave", s.handleLeaveGroup)
 	mux.HandleFunc("GET /api/sessions/{sid}/groups/{gid}/participants", s.handleGroupParticipants)
+	mux.HandleFunc("POST /api/sessions/{sid}/groups/{gid}/history/share", s.handleGroupHistoryShare)
+	mux.HandleFunc("GET /api/sessions/{sid}/abprops", s.handleABProps)
 	mux.HandleFunc("POST /api/sessions/{sid}/groups/{gid}/participants/add", s.handleGroupParticipantChange(whatsmeow.ParticipantChangeAdd))
 	mux.HandleFunc("POST /api/sessions/{sid}/groups/{gid}/participants/remove", s.handleGroupParticipantChange(whatsmeow.ParticipantChangeRemove))
 	mux.HandleFunc("POST /api/sessions/{sid}/groups/{gid}/participants/promote", s.handleGroupParticipantChange(whatsmeow.ParticipantChangePromote))
@@ -404,7 +433,7 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	cfg := map[string]any{
 		"maxCallsPerSession": s.sessions.maxCalls,
 		// Transporte de mídia padrão da chamada (ex.: "websocket") — o widget do
 		// Chatwoot lê isso p/ usar WS por padrão onde o WebRTC (UDP) não fecha.
@@ -413,7 +442,15 @@ func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// logo e `commit` (SHA) no tooltip.
 		"version": version,
 		"commit":  commit,
-	})
+		// Chamada em grupo (experimental) habilitada nesta instância.
+		"groupCalls": groupCallsEnabled(),
+	}
+	// IP público anunciado no WebRTC/SIP e de onde veio (env, interface, stun:…,
+	// http:…) — diagnóstico do WACALLS_PUBLIC_IP=auto.
+	if ip, src := publicIPInfo(); ip != "" {
+		cfg["publicIp"], cfg["publicIpSource"] = ip, src
+	}
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func (s *server) handleSessionList(w http.ResponseWriter, r *http.Request) {
@@ -528,6 +565,51 @@ func (s *server) handleEndCall(w http.ResponseWriter, r *http.Request) {
 // handleCallVideo controla a negociação de vídeo mid-call numa chamada ativa.
 // action ∈ {request, accept, reject, stop}: pedir upgrade p/ vídeo, aceitar/recusar
 // um pedido recebido, ou desligar o vídeo (downgrade p/ áudio).
+// handleCallMute anuncia ao peer o estado do nosso microfone (<mute_v2>). Body:
+// {"muted": true|false}. Portado do zapo (indicador de mic-off no outro lado).
+func (s *server) handleCallMute(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	ac, ok := sess.reg.get(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
+	var b struct {
+		Muted bool `json:"muted"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&b)
+	if err := ac.cm.AnnounceMute(r.Context(), b.Muted); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "muted": b.Muted})
+}
+
+// handleCallHand anuncia ao peer a nossa mão levantada/baixada. Body: {"raised": bool}.
+func (s *server) handleCallHand(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	ac, ok := sess.reg.get(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+		return
+	}
+	var b struct {
+		Raised bool `json:"raised"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&b)
+	if err := ac.cm.SetHandRaised(r.Context(), b.Raised); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "raised": b.Raised})
+}
+
 func (s *server) handleCallVideo(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessionByID(w, r.PathValue("sid"))
 	if sess == nil {
@@ -675,10 +757,10 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var body struct {
-		Phone      string `json:"phone"`
-		DurationMs int    `json:"duration_ms"`
-		Record     bool   `json:"record"`
-		Video      bool   `json:"video"`
+		Phone      string  `json:"phone"`
+		DurationMs flexInt `json:"duration_ms"` // reservado (ignorado); aceita número ou string
+		Record     bool    `json:"record"`
+		Video      bool    `json:"video"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Phone) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "phone required"})
@@ -777,6 +859,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 		}
 		down := media.Downsample48to16(pcm48)
 		ac.recorder.writeBrowser(down)
+		ac.spies.feed(spySideAgent, down)
 		ac.cm.FeedCapturedPCM(down)
 	}
 	bridge.OnBrowserVideo = func(au []byte) {

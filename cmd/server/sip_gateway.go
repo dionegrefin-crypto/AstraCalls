@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -337,6 +336,7 @@ func (gw *SIPGateway) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	rtpBridge.OnCapturedPCM = func(pcm []float32) {
+		ac.spies.feed(spySideAgent, pcm)
 		ac.cm.FeedCapturedPCM(pcm)
 	}
 	sess.setRTPBridge(callID, rtpBridge)
@@ -555,6 +555,13 @@ func (gw *SIPGateway) handleInboundCall(sess *Session, callID, peerNumber string
 		}
 		targetURI = sip.Uri{Scheme: "sip", User: cfg.Dest, Host: cfg.Host, Port: port}
 		targetLabel = cfg.Dest + "@" + cfg.Host
+		// Outbound proxy: roteia o INVITE pro proxy (next hop), mantendo o ramal/domínio.
+		if px := strings.TrimSpace(cfg.Proxy); px != "" {
+			ph, pp := sipHostPortParts(px, port)
+			targetURI.Host = ph
+			targetURI.Port = pp
+			targetLabel = cfg.Dest + "@" + cfg.Host + " via " + px
+		}
 	} else {
 		return // nenhum destino SIP: a chamada segue só para o painel web.
 	}
@@ -703,11 +710,12 @@ func extractRTPAddress(sdp string) string {
 	return ""
 }
 
-// getLocalIP devolve o IP anunciado no SDP. Em VPS atrás de NAT, defina
-// WACALLS_PUBLIC_IP com o IP público (o valor "auto" cai na detecção local).
+// getLocalIP devolve o IP anunciado no SDP/Contact do SIP: WACALLS_PUBLIC_IP
+// fixo, ou o IP público descoberto quando vale "auto" (ver publicip.go). Sem a
+// variável, cai no IP da primeira interface (comportamento antigo).
 func getLocalIP() string {
-	if env := strings.TrimSpace(os.Getenv("WACALLS_PUBLIC_IP")); env != "" && env != "auto" {
-		return env
+	if ip := resolvedPublicIP(nil); ip != "" {
+		return ip
 	}
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
