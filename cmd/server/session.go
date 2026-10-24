@@ -452,20 +452,11 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		// caller ID do SIP é o telefone resolvido; o LID cru só como último recurso
 		// (o PBX mostraria um "número" que não dá para retornar).
 		if s.mgr.sipInbound != nil {
-<<<<<<< HEAD
-			// caller ID no ramal = telefone real; o LID só quando não há como resolver
-			sipPeer := phone
-			if sipPeer == "" {
-				sipPeer = sipUserPart(c.PeerJid)
-			}
-			s.mgr.sipInbound(s, c.CallID, sipPeer)
-=======
 			callerID := phone
 			if callerID == "" {
 				callerID = sipUserPart(c.PeerJid)
 			}
 			s.mgr.sipInbound(s, c.CallID, callerID)
->>>>>>> v1.1.3
 		}
 	}
 	cm.OnStateChange = func(c *call.CallInfo) {
