@@ -1,6 +1,6 @@
 name: Imagem do fork (amd64)
 
-# Imagem da v1.1.2 + correções ainda não aceitas no repositório oficial,
+# Imagem da v1.1.3 + correções ainda não aceitas no repositório oficial,
 # publicada no GHCR desta conta. Só amd64: é o que o servidor usa.
 
 on:
@@ -30,7 +30,7 @@ jobs:
           push: true
           build-args: |
             BUILD_REV=${{ github.sha }}
-            BUILD_VERSION=v1.1.2-meganet
+            BUILD_VERSION=v1.1.3-meganet
           tags: |
             ghcr.io/dionegrefin-crypto/astracalls:meganet
             ghcr.io/dionegrefin-crypto/astracalls:meganet-${{ github.sha }}

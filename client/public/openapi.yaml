@@ -137,6 +137,12 @@ components:
       schema: { type: string }
       description: Número ou JID do chat.
   schemas:
+    SIPAgentConfig:
+      type: object
+      properties:
+        inboundMode: { type: string, enum: [originate, agent, auto], example: agent }
+        agentAutoAnswer: { type: boolean, description: "true = 200 OK logo após o 180, sem esperar o POST /accept" }
+        agentRingTimeoutSeconds: { type: integer, example: 30, description: "Sem accept nesse prazo o INVITE recebe 480 (0 = WACALLS_RING_TIMEOUT_SECONDS)" }
     Session:
       type: object
       properties:
@@ -184,6 +190,7 @@ components:
         participant: { type: string, description: "Opcional. Em grupo, JID de quem enviou a mensagem citada." }
         fromMe: { type: boolean, description: "Opcional. true se a mensagem citada foi enviada por você." }
         mentions: { type: array, items: { type: string }, description: "Números ou JIDs a mencionar (@) na legenda." }
+        mentionAll: { type: boolean, description: "GRUPO: marca todos os participantes (marcação fantasma — não precisa de @ na legenda)." }
     CommunityGroups:
       type: object
       properties:
@@ -261,6 +268,29 @@ components:
         webhook: { type: string, description: "URL configurada (\"\" = nenhuma)" }
         hasSecret: { type: boolean, description: "true se há secret (o valor nunca é devolvido)" }
         events: { type: array, items: { type: string }, description: "Filtro de eventos (vazio = todos)" }
+        ignoreGroups: { type: boolean, description: "true = eventos de grupo não são entregues" }
+    WebhookInput:
+      type: object
+      properties:
+        name: { type: string, example: "n8n" }
+        url: { type: string, example: "https://meu-sistema/webhook/astracalls" }
+        secret: { type: string, description: "Assina cada entrega (X-Webhook-Signature: sha256=<hex>). Ausente = mantém; \"\" = remove." }
+        events: { type: array, items: { type: string }, description: "Só entrega estes tipos (vazio = todos)", example: ["message"] }
+        ignoreGroups: { type: boolean, description: "true = não entrega eventos de grupo" }
+    WebhookItem:
+      type: object
+      properties:
+        id: { type: string, example: "default" }
+        name: { type: string }
+        url: { type: string }
+        hasSecret: { type: boolean, description: "o secret nunca é devolvido" }
+        events: { type: array, items: { type: string } }
+        ignoreGroups: { type: boolean }
+        status:
+          type: object
+          properties:
+            state: { type: string, enum: [closed, open, disabled] }
+            consecutiveFailures: { type: integer }
     ChatwootConfig:
       type: object
       description: "Configuração da integração Chatwoot. `account_token` NUNCA é devolvido (vem vazio)."
@@ -1035,6 +1065,9 @@ paths:
                   status: { type: string, example: "registered", description: "registering/registered/failed" }
                   error: { type: string }
                   advertise: { type: string, description: "host:porta SIP anunciado no Contact" }
+                  inboundMode: { type: string, enum: [originate, agent, auto], description: "O que fazer com INVITE entrante (ver /sip-agent)" }
+                  agentAutoAnswer: { type: boolean }
+                  agentRingTimeoutSeconds: { type: integer }
     post:
       tags: [SIP]
       summary: "SIP modelo 2 — grava/aplica o registro no PBX externo"
@@ -1056,6 +1089,9 @@ paths:
                 pass: { type: string }
                 dest: { type: string, example: "600" }
                 proxy: { type: string, example: "sip.provedor.com:5060", description: "Outbound proxy (host[:porta]); vazio = usa host" }
+                inboundMode: { type: string, enum: [originate, agent, auto], description: "Opcional; ausente = mantém. Ver /sip-agent" }
+                agentAutoAnswer: { type: boolean, description: "Opcional; ausente = mantém" }
+                agentRingTimeoutSeconds: { type: integer, description: "Opcional; ausente = mantém" }
       responses:
         "200":
           description: Atualizado
@@ -1063,6 +1099,96 @@ paths:
             application/json:
               schema: { type: object, properties: { status: { type: string, example: updated } } }
         "400": { description: "host e usuário são obrigatórios (com enabled=true) / body inválido" }
+  /api/sessions/{sid}/sip-agent:
+    get:
+      tags: [SIP]
+      summary: "SIP modo agente — o que fazer com a ligação que CHEGA no ramal"
+      description: >
+        `originate` (padrão): o INVITE é uma ordem de discar no WhatsApp para o número do
+        Request-URI (gateway PBX→WhatsApp). `agent`: o AstraCalls ATENDE o INVITE e entrega a
+        chamada ao agente de voz como uma chamada recebida comum — evento `incoming` no SSE
+        (`source: "sip"`, `phone` = número do From/P-Asserted-Identity, bloco `sip`),
+        `POST /calls/{id}/accept` responde 200 OK, `GET /calls/{id}/ws` fala PCM16 16 kHz,
+        `DELETE /calls/{id}` manda BYE, `POST /calls/{id}/reject` responde 486 (603 com
+        `{"reason":"decline"}`). `auto`: agente quando ligaram para o próprio ramal/usuário SIP,
+        originate quando o destino é outro número. Vale para os dois modelos (PBX registrado em
+        nós ou nós registrados no PBX). Codec G.711 PCMU/PCMA conforme a oferta; DTMF
+        (telephone-event) chega no WS como `{"type":"dtmf","digit":"5"}`; a ponte pode mandar
+        `{"type":"clear"}` para descartar o áudio ainda não tocado. Chamadas SIP e WhatsApp
+        dividem o limite WACALLS_MAX_CALLS (acima dele: 486).
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { $ref: "#/components/parameters/ClientId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SIPAgentConfig" }
+    post:
+      tags: [SIP]
+      summary: "SIP modo agente — altera só o modo (não mexe no registro no PBX)"
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { $ref: "#/components/parameters/ClientId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SIPAgentConfig" }
+      responses:
+        "200":
+          description: Config em vigor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SIPAgentConfig" }
+        "400": { description: "inboundMode inválido ou agentRingTimeoutSeconds fora de 0..600" }
+  /api/sessions/{sid}/capping:
+    get:
+      tags: [Sessões]
+      summary: Limite de conversas novas (message capping) do número
+      description: >
+        Cota de conversas NOVAS (contatos que ainda não falaram com o número) que o
+        WhatsApp libera por ciclo, quanto já foi usado e o status: `NONE`,
+        `FIRST_WARNING`, `SECOND_WARNING` ou `CAPPED` (esgotado — mensagens para
+        contatos novos deixam de ser entregues até o fim do ciclo). O valor fica em
+        cache por 30 min; `?refresh=1` consulta o WhatsApp na hora. Mudanças de status
+        disparam o webhook `message_capping` e, em aviso/travado, um alerta no Chatwoot.
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { $ref: "#/components/parameters/ClientId" }
+        - name: refresh
+          in: query
+          required: false
+          schema: { type: string, enum: ["1", "true"] }
+          description: Força nova consulta ao WhatsApp
+      responses:
+        "200":
+          description: OK (`capping` null quando ainda não foi possível consultar; `error` traz o motivo)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session: { type: string }
+                  updated_at: { type: integer, description: "epoch ms da última consulta" }
+                  error: { type: string }
+                  capping:
+                    type: object
+                    nullable: true
+                    properties:
+                      total_quota: { type: integer, example: 50, description: "-1 = sem limite aplicado à conta" }
+                      used_quota: { type: integer, example: 12 }
+                      remaining: { type: integer, example: 38, description: "-1 quando unlimited" }
+                      unlimited: { type: boolean, description: "true quando o WhatsApp não aplica cota a este número" }
+                      capping_status: { type: string, enum: [NONE, FIRST_WARNING, SECOND_WARNING, CAPPED] }
+                      ote_status: { type: string }
+                      mv_status: { type: string }
+                      cycle_start_at: { type: integer, description: "epoch ms" }
+                      cycle_end_at: { type: integer, description: "epoch ms" }
+                      seconds_to_cycle_end: { type: integer }
+                      subscription_status: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{sid}/restriction-status:
     get:
       tags: [Sessões]
@@ -1309,6 +1435,7 @@ paths:
                 participant: { type: string, description: "Opcional. Em grupo, o JID de quem enviou a mensagem citada (só se a resolução automática não achar)." }
                 fromMe: { type: boolean, description: "Opcional. true se a mensagem citada foi enviada por você." }
                 mentions: { type: array, items: { type: string }, description: "Números ou JIDs a mencionar (@). O texto deve conter os @ correspondentes. Em GRUPO, se omitido, o gateway detecta sozinho os `@<8..15 dígitos>` do texto.", example: ["5561999999999"] }
+                mentionAll: { type: boolean, description: "GRUPO: marca TODOS os participantes (\"@todos\" nativo do WhatsApp: contextInfo.nonJidMentions=1 + participantes em mentionedJid). Sem @ no texto = marcação fantasma. Equivale a mentions:[\"all\"]. `@todos`/`@all`/`@everyone` no texto (inclusive pelo Chatwoot) também marca todos e vira o token `@all`.", example: true }
       responses:
         "200": { $ref: "#/components/responses/SendOK" }
         "503": { description: Conta não pareada }
@@ -1425,7 +1552,8 @@ paths:
   /api/sessions/{sid}/webhook:
     get:
       tags: [Webhook]
-      summary: Consulta a URL de webhook da sessão
+      summary: Consulta o webhook principal ("default") da sessão
+      description: Rota de 1 webhook (compatível). Para vários webhooks use `/webhooks`.
       parameters:
         - { $ref: "#/components/parameters/Sid" }
         - { $ref: "#/components/parameters/ClientId" }
@@ -1437,8 +1565,10 @@ paths:
               schema: { $ref: "#/components/schemas/WebhookConfig" }
     post:
       tags: [Webhook]
-      summary: Define a URL de webhook (recebe os eventos da sessão)
+      summary: Define o webhook principal ("default") da sessão
       description: |
+        Rota de 1 webhook (compatível): mexe só no webhook `default`; os demais criados em
+        `/webhooks` não são afetados.
         Eventos enviados (POST JSON) no formato `{ session, event, timestamp, data }`.
         `event` pode ser `message` (mensagem recebida, com `data.text`, `data.type`, `data.raw`...),
         `receipt` (confirmações de entrega/leitura) ou `group_participants` (entrada/saída/promoção
@@ -1455,8 +1585,9 @@ paths:
               required: [url]
               properties:
                 url: { type: string, example: "https://meu-sistema/webhook/wacalls", description: "Vazio = remove o webhook (igual ao DELETE)" }
-                secret: { type: string, description: "Opcional. Assina cada entrega com HMAC-SHA256 no header X-Webhook-Signature: sha256=<hex>." }
+                secret: { type: string, description: "Opcional. Assina cada entrega com HMAC-SHA256 no header X-Webhook-Signature: sha256=<hex>. Ausente = mantém o atual; \"\" = remove." }
                 events: { type: array, items: { type: string }, description: "Opcional. Só entrega estes tipos de evento (vazio = todos).", example: ["message", "receipt"] }
+                ignoreGroups: { type: boolean, description: "Opcional. true = não entrega NENHUM evento de grupo (mensagem, receipt, reação, group_participants… de chat @g.us). Ausente = mantém o atual.", example: true }
       responses:
         "200":
           description: Salvo
@@ -1693,7 +1824,7 @@ paths:
         - `call-list` `{calls:[CallRecord]}` — chamadas ativas.
         - `call-status` `{sessionId, id, owner, status, peer, startedAt, held}`.
         - `call-ended` `{sessionId, id, owner, reason, endedAt}`.
-        - `incoming` `{sessionId, id, peer, phone, name, video, offeredAt}` — chamada recebida
+        - `incoming` `{sessionId, id, peer, phone, name, video, offeredAt, source}` — chamada recebida. `source`: `whatsapp` ou `sip` (modo agente do SIP, com o bloco extra `sip: {callId, from, to, codec}` e `id` começando com `sip-`)
           (`phone`/`name` resolvidos; `peer` pode ser @lid).
         - `incoming-claimed` `{sessionId, id, owner}` — alguém atendeu.
         - `video-state` `{sessionId, id, kind, peerVideo, localVideo, upgradeIncoming, upgradeOutgoing, peerOrientation}`
@@ -1704,6 +1835,7 @@ paths:
         - `call-transfer-offer` `{sessionId, id, peer, from, offeredAt}` — chamada transferida
           aguardando pickup (só o alvo recebe, se houver).
         - `call-transfer-claimed` `{sessionId, id, owner}`.
+        - `call-webrtc-failed` `{sessionId, id, reason}` — chamada SIP (modo agente): o WebRTC do navegador não conectou (ICE). A ligação NÃO cai: volta para a espera com música; o painel pode repetir `POST /calls/{id}/webrtc`.
 
         Escopo por conta: com `accountId` (ou `X-Client-Id`/`clientId` no padrão
         `astrachat_accN`, de onde a conta N é derivada) só chegam os eventos de chamada das
@@ -2450,6 +2582,35 @@ paths:
                 properties:
                   ok: { type: boolean }
                   participants: { type: array, items: { $ref: "#/components/schemas/CommunityParticipantAdd" } }
+
+  /api/sessions/{sid}/groups/{gid}/status:
+    post:
+      tags: [Grupos]
+      summary: Posta um status do grupo (24 h)
+      description: >
+        Status do grupo: fica 24 h na aba Atualizações, dentro do grupo, fora da conversa — só os
+        membros veem. Texto com cor de fundo OU imagem com legenda (a imagem é enviada de novo a
+        cada post).
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { $ref: "#/components/parameters/Gid" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text: { type: string, example: "Promoção só hoje!" }
+                backgroundColor: { type: string, example: "#233E4F", description: "#RRGGBB ou #AARRGGBB" }
+                textColor: { type: string, example: "#FFFFFF" }
+                font: { type: integer, example: 6, description: "fonte do status de texto (número do enum)" }
+                imageUrl: { type: string }
+                base64: { type: string }
+                caption: { type: string }
+      responses:
+        "200": { description: "Postado: {id, to, timestamp}" }
+        "400": { description: "text ou imagem obrigatório / cor inválida" }
 
   /api/sessions/{sid}/groups/{gid}/leave:
     post:
@@ -3425,6 +3586,11 @@ paths:
       description: >
         Passa a chamada para outro atendente (troca de dono + ponte), sem tocar o leg do
         WhatsApp. Com `to` = clientId do atendente alvo; sem ele, a oferta vai para todos.
+        Também vale para a chamada SIP do modo agente (`sip-…`): ela vai para a espera com
+        música (`moh:false` = silêncio), a ponte WS da IA recebe `{"type":"call-transferred"}`
+        e é fechada SEM derrubar a ligação, o dono é liberado e sai `call-transfer-offer`.
+        O atendente assume com `.../pickup` e conecta o áudio com `.../webrtc` ou `.../ws`,
+        o que tira a chamada da espera.
       parameters:
         - { $ref: "#/components/parameters/Sid" }
         - { $ref: "#/components/parameters/CallId" }
@@ -3437,6 +3603,7 @@ paths:
               type: object
               properties:
                 to: { type: string, description: "clientId do atendente alvo (opcional = fila)" }
+                moh: { type: boolean, description: "música de espera durante a transferência (padrão true)" }
       responses:
         "200":
           description: Transferida
@@ -3457,6 +3624,7 @@ paths:
       description: >
         Fixa o novo dono (`X-Client-Id`) de uma chamada transferida (não re-atende no
         WhatsApp). Depois o navegador chama `.../webrtc` (abre a ponte) e `.../resume`.
+        Na chamada SIP do modo agente, conectar `.../webrtc` ou `.../ws` já tira da espera.
       parameters:
         - { $ref: "#/components/parameters/Sid" }
         - { $ref: "#/components/parameters/CallId" }
@@ -3505,11 +3673,15 @@ paths:
       tags: [Mensagens]
       summary: Envia cobrança Pix (Copia e Cola / BR Code)
       description: >
-        Monta o "Pix Copia e Cola" (BR Code EMV do Banco Central) e envia como TEXTO.
-        NÃO é o Pix nativo (interactiveMessage) — o WhatsApp bloqueia esse para clientes
-        não-oficiais. Informe `key` (gera o código) OU `code` (BR Code pronto). Se houver
-        `description`, ela vai numa mensagem antes do código. Esta rota NÃO usa o id de
-        idempotência (`X-Message-ID`).
+        Padrão: monta o "Pix Copia e Cola" (BR Code EMV do Banco Central) e envia como TEXTO.
+        Informe `key` (gera o código) OU `code` (BR Code pronto). Se houver `description`,
+        ela vai numa mensagem antes do código.
+
+        Com `style: "charge"`: envia o CARTÃO DE COBRANÇA nativo do WhatsApp Business (o
+        mesmo do "Cobrar" do app) — referência (`txid`), itens, total em R$ e botão Pagar
+        que abre o fluxo de pagamento. Exige `key` e `amount` (ou `items`, cuja soma vira o
+        total). `description` vira o texto do cartão e `footer` o rodapé. Requer conta
+        WhatsApp Business. Neste modo a rota aceita `X-Message-ID`.
       parameters:
         - { $ref: "#/components/parameters/Sid" }
         - { $ref: "#/components/parameters/ClientId" }
@@ -3529,6 +3701,18 @@ paths:
                 txid: { type: string, example: "PEDIDO123", description: "máx 25" }
                 description: { type: string, example: "Cobrança do plano" }
                 code: { type: string, description: "BR Code pronto (ignora key/amount/etc.)" }
+                style: { type: string, enum: [text, charge], description: "charge = cartão de cobrança nativo" }
+                keyType: { type: string, enum: [CPF, CNPJ, EMAIL, PHONE, EVP], description: "tipo da chave (charge); deduzido se ausente" }
+                footer: { type: string, description: "rodapé do cartão (charge)" }
+                items:
+                  type: array
+                  description: "itens da cobrança (charge); sem itens vira um item 'Cobrança' com o amount"
+                  items:
+                    type: object
+                    properties:
+                      name: { type: string, example: "Camisa" }
+                      amount: { type: number, example: 49.9, description: "valor unitário em reais" }
+                      quantity: { type: integer, example: 2 }
       responses:
         "200":
           description: Pix enviado
@@ -4098,7 +4282,7 @@ paths:
                   items:
                     type: object
                     properties:
-                      type: { type: string, enum: [quick_reply, cta_url, cta_copy, cta_call, webview, form], description: "webview e form são sinônimos (cta_url aberto em webview tela cheia)" }
+                      type: { type: string, enum: [quick_reply, cta_url, cta_copy, cta_call, webview, form, cta_catalog], description: "webview e form são sinônimos (cta_url aberto em webview tela cheia); cta_catalog abre o produto `id` no catálogo (sem id, o catálogo inteiro)" }
                       displayText: { type: string }
                       url: { type: string, description: "para cta_url / webview (webview abre em tela cheia dentro do WhatsApp)" }
                       id: { type: string, description: "para quick_reply" }
@@ -4143,6 +4327,79 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/SendOK" }
 
+  /api/sessions/{sid}/messages/catalog:
+    post:
+      tags: [Mensagens]
+      summary: Mensagem de catálogo (abre a vitrine)
+      description: >
+        Botão nativo "Ver catálogo" que abre a vitrine inteira da empresa dentro do WhatsApp
+        (celular e Web). `productId` usa esse produto como miniatura. Requer conta Business com
+        catálogo. Para produtos lado a lado use /messages/carousel com botões
+        `{"type":"cta_catalog","id":"<produto>"}` (o card ganha um link "Ver catálogo" se não
+        tiver nenhum, senão o celular descarta).
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to: { type: string, example: "5561999999999" }
+                body: { type: string, example: "Confira nosso catálogo 👇" }
+                footer: { type: string }
+                productId: { type: string, description: "retailer id do produto da miniatura" }
+      responses:
+        "200": { description: "Enviada: {id, to, timestamp}" }
+
+  /api/sessions/{sid}/meta-ai:
+    post:
+      tags: [Mensagens]
+      summary: Pergunta à Meta AI pela conta conectada
+      description: >
+        Manda a pergunta (texto ou imagem) para a Meta AI como o próprio app e devolve a
+        resposta completa. `thread` mantém o contexto por 30 min (ex.: o número do cliente).
+        `instructions` vai antes da 1ª pergunta de cada conversa. `replyTo` manda "Pensando…" no
+        chat e edita com a resposta; `label` marca com o selo IA (só conta Business, só conversa
+        privada). ATENÇÃO: a memória da Meta AI é da conta, não da conversa — o que um cliente
+        disser pode aparecer para outro; não use com dado pessoal.
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                prompt: { type: string, example: "Resuma em 2 linhas: ..." }
+                imageUrl: { type: string }
+                base64: { type: string }
+                thread: { type: string, example: "5561999999999" }
+                instructions: { type: string, example: "Responda em português, curto." }
+                timeoutSeconds: { type: integer, example: 35 }
+                replyTo: { type: string, example: "5561999999999" }
+                label: { type: boolean }
+      responses:
+        "200":
+          description: Resposta
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer: { type: string }
+                  complete: { type: boolean }
+                  chunks: { type: integer }
+                  thread: { type: string }
+                  threadNew: { type: boolean }
+                  promptId: { type: string }
+                  messageId: { type: string, description: "mensagem editada no replyTo" }
+                  ms: { type: integer }
+        "504": { description: "A Meta AI não respondeu a tempo (answer pode vir parcial)" }
+
   /api/sessions/{sid}/messages/carousel:
     post:
       tags: [Interativas]
@@ -4176,7 +4433,7 @@ paths:
                         items:
                           type: object
                           properties:
-                            type: { type: string, enum: [quick_reply, cta_url, cta_copy, cta_call, webview, form] }
+                            type: { type: string, enum: [quick_reply, cta_url, cta_copy, cta_call, webview, form, cta_catalog], description: "cta_catalog = produto `id` no catálogo; card sem link ganha \"Ver catálogo\"" }
                             displayText: { type: string }
                             url: { type: string }
                             id: { type: string }
@@ -4520,10 +4777,90 @@ paths:
   # ─────────────────────────────────────────────────────────────────
   # Webhook — status/DLQ/replay/reenable
   # ─────────────────────────────────────────────────────────────────
+  /api/sessions/{sid}/webhooks:
+    get:
+      tags: [Webhook]
+      summary: Lista os webhooks da sessão
+      description: |
+        Uma sessão pode ter vários webhooks (até `max`), cada um com URL, secret, filtro de eventos,
+        "ignorar grupos" e circuito de entrega próprios. Todos recebem o mesmo payload
+        `{ session, event, timestamp, data }`. O webhook `default` é o mesmo da rota `/webhook`.
+      parameters: [ { $ref: "#/components/parameters/Sid" } ]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks: { type: array, items: { $ref: "#/components/schemas/WebhookItem" } }
+                  max: { type: integer, example: 10 }
+    post:
+      tags: [Webhook]
+      summary: Adiciona um webhook à sessão
+      description: O primeiro webhook da sessão recebe o id `default`.
+      parameters: [ { $ref: "#/components/parameters/Sid" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf: [ { $ref: "#/components/schemas/WebhookInput" } ]
+              required: [url]
+      responses:
+        "201": { description: Criado, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookItem" } } } }
+        "400": { description: URL inválida }
+        "409": { description: Limite de webhooks atingido }
+  /api/sessions/{sid}/webhooks/{wid}:
+    put:
+      tags: [Webhook]
+      summary: Altera um webhook
+      description: Campos ausentes mantêm o valor atual. `secret` "" remove o secret.
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { name: wid, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookInput" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookItem" } } } }
+        "404": { description: Webhook não encontrado }
+    delete:
+      tags: [Webhook]
+      summary: Remove um webhook
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { name: wid, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Removido }
+        "404": { description: Webhook não encontrado }
+  /api/sessions/{sid}/webhooks/{wid}/test:
+    post:
+      tags: [Webhook]
+      summary: Envia um evento de teste
+      description: "Faz um POST com `event: test` na hora (sem retry/DLQ) e devolve o status HTTP que o endpoint respondeu."
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { name: wid, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Resultado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  status: { type: integer, example: 200 }
+                  error: { type: string }
   /api/sessions/{sid}/webhooks/status:
     get:
       tags: [Webhook]
-      summary: Estado do circuito de entrega do webhook (circuit breaker + DLQ)
+      summary: Estado do circuito de entrega dos webhooks (circuit breaker + DLQ)
+      description: O circuito é POR webhook. Os campos do topo trazem o pior estado; `webhooks` traz cada um.
       parameters: [ { $ref: "#/components/parameters/Sid" } ]
       responses:
         "200":
@@ -4538,6 +4875,14 @@ paths:
                   dlqSize: { type: integer }
                   disabledReason: { type: string, description: "Só quando disabled" }
                   openUntil: { type: integer, format: int64, description: "epoch ms (só com o circuito aberto)" }
+                  webhooks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        state: { type: string, enum: [closed, open, disabled] }
+                        consecutiveFailures: { type: integer }
   /api/sessions/{sid}/webhooks/dlq:
     get:
       tags: [Webhook]
@@ -4581,8 +4926,10 @@ paths:
   /api/sessions/{sid}/webhooks/reenable:
     post:
       tags: [Webhook]
-      summary: Religa um webhook desabilitado/aberto (zera o circuito)
-      parameters: [ { $ref: "#/components/parameters/Sid" } ]
+      summary: Religa webhooks desabilitados/abertos (zera o circuito)
+      parameters:
+        - { $ref: "#/components/parameters/Sid" }
+        - { name: webhookId, in: query, required: false, schema: { type: string }, description: "Só este webhook (ausente = todos da sessão)" }
       responses:
         "200":
           description: OK

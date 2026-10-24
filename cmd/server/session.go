@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -48,15 +50,15 @@ type Session struct {
 	waContainer *sqlstore.Container
 	waDB        *sql.DB
 
-	mu            sync.Mutex
-	auth          AuthSnapshot
-	webhook       string
-	webhookSecret string   // segredo p/ assinar o payload (X-Webhook-Signature); vazio = sem assinatura
-	webhookEvents []string // filtro: só entrega estes tipos de evento; vazio = todos
-	chatwoot      ChatwootConfig
-	recording     bool   // grava as chamadas desta sessão (opt-in)
-	proxy         string // proxy de saída da conexão WhatsApp (http/https/socks5)
-	lastJID       string // último número (JID) que esteve conectado; mantido após desconectar
+	mu        sync.Mutex
+	auth      AuthSnapshot
+	webhooks  []WebhookTarget // webhooks da sessão (o "default" é o da rota antiga /webhook)
+	webhookMu sync.Mutex      // serializa alterar+persistir a lista de webhooks
+	avatars   avatarCache     // foto de perfil p/ o Chatwoot (ver avatarcache.go)
+	chatwoot  ChatwootConfig
+	recording bool   // grava as chamadas desta sessão (opt-in)
+	proxy     string // proxy de saída da conexão WhatsApp (http/https/socks5)
+	lastJID   string // último número (JID) que esteve conectado; mantido após desconectar
 
 	// Credenciais SIP desta sessão (modelo Wavoip: o PBX do cliente se registra
 	// no AstraCalls usando estes dados). Definidas na criação da sessão.
@@ -72,6 +74,8 @@ type Session struct {
 	SIPExtPass    string
 	SIPExtDest    string
 	SIPExtProxy   string // outbound proxy (host[:porta]) — p/ onde mandar REGISTER/INVITE; vazio = usa Host
+	// SIPAgent: o que fazer com INVITE entrante (originar WhatsApp ou atender p/ o agente).
+	SIPAgent sipAgentOpts
 	// estado do registro no PBX externo (registering/registered/failed), atualizado
 	// pelo registrador UAC; exibido no painel. Protegido por s.mu.
 	sipExtStatus string
@@ -89,6 +93,12 @@ type Session struct {
 	restrictionEndsAt    time.Time
 	restrictionUpdatedAt time.Time
 	restrictionAlerted   bool // evita repetir o alerta no Chatwoot enquanto ativa
+
+	// Limite de conversas novas (message capping, ver capping.go). Protegido por s.mu.
+	capping        *messageCapping
+	cappingAt      time.Time
+	cappingErr     string
+	cappingAlerted string // último status alertado no Chatwoot ("" = nenhum)
 
 	// sentIDs guarda os IDs de mensagens que ESTE cliente enviou, com a origem
 	// (API ou agente do Chatwoot), para decidir o que fazer quando voltarem como
@@ -264,49 +274,6 @@ func (s *Session) resolveCanonical(ctx context.Context, jid types.JID) (types.JI
 	return lid, pn, true
 }
 
-func (s *Session) setWebhook(url, secret string, events []string) {
-	s.mu.Lock()
-	s.webhook = url
-	s.webhookSecret = secret
-	s.webhookEvents = events
-	s.mu.Unlock()
-}
-
-func (s *Session) getWebhook() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.webhook
-}
-
-func (s *Session) getWebhookSecret() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.webhookSecret
-}
-
-func (s *Session) getWebhookEvents() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.webhookEvents
-}
-
-// webhookWants diz se o evento deve ser entregue conforme o filtro da sessão.
-// Filtro vazio = entrega tudo (comportamento antigo).
-func (s *Session) webhookWants(event string) bool {
-	s.mu.Lock()
-	ev := s.webhookEvents
-	s.mu.Unlock()
-	if len(ev) == 0 {
-		return true
-	}
-	for _, e := range ev {
-		if e == event {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Session) setChatwoot(c ChatwootConfig) {
 	s.mu.Lock()
 	s.chatwoot = c
@@ -376,6 +343,7 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 	}
 	client.AddEventHandler(s.handleEvent)
 	go s.runPresenceKeepalive()
+	go s.runCappingRefresh()
 	return s
 }
 
@@ -480,14 +448,24 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		s.log.Info("incoming call: broadcasting", "callID", c.CallID, "peer", c.PeerJid,
 			"acct", acct, "subs_total", total, "subs_matched", matched, "subs_widget_other_acct", otherAcct)
 		s.mgr.broker.emitIncoming(s.id, c.CallID, peerOut, phone, name, c.MediaType == core.CallMediaTypeVideo)
-		// se um tronco SIP está registrado, toca essa chamada no ramal também.
+		// se um tronco SIP está registrado, toca essa chamada no ramal também. O
+		// caller ID do SIP é o telefone resolvido; o LID cru só como último recurso
+		// (o PBX mostraria um "número" que não dá para retornar).
 		if s.mgr.sipInbound != nil {
+<<<<<<< HEAD
 			// caller ID no ramal = telefone real; o LID só quando não há como resolver
 			sipPeer := phone
 			if sipPeer == "" {
 				sipPeer = sipUserPart(c.PeerJid)
 			}
 			s.mgr.sipInbound(s, c.CallID, sipPeer)
+=======
+			callerID := phone
+			if callerID == "" {
+				callerID = sipUserPart(c.PeerJid)
+			}
+			s.mgr.sipInbound(s, c.CallID, callerID)
+>>>>>>> v1.1.3
 		}
 	}
 	cm.OnStateChange = func(c *call.CallInfo) {
@@ -655,11 +633,22 @@ func (s *Session) onIncomingOffer(ctx context.Context, evt *events.CallOffer) {
 			"call_id", callID, "from", evt.From.String(), "group_jid", g)
 		return
 	}
-	if max := s.mgr.maxCalls; max > 0 && s.reg.count() >= max {
+	if max := s.mgr.maxCalls; max > 0 && s.activeCallCount() >= max {
 		s.rejectOffer(ctx, node, evt.From)
 		return
 	}
 	cm := s.createCall(callID, s.getRecording())
+	// O whatsmeow engole panic do handler de evento (logger Noop): sem isto a
+	// chamada ficaria no registro sem timer de toque (chamada fantasma ocupando
+	// vaga de WACALLS_MAX_CALLS).
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("panic ao tratar oferta de chamada; descartando", "call_id", callID,
+				"panic", r, "stack", string(debug.Stack()))
+			s.removeCall(callID)
+			s.mgr.broker.endCall(callID, "error")
+		}
+	}()
 	// telefone real do chamador: o offer traz caller_pn em CallCreatorAlt quando o
 	// creator é LID; ou o próprio CallCreator já é PN. Evita "desconhecido" sem
 	// depender do mapa local de LID (bug 01/10).
@@ -760,6 +749,13 @@ func (s *Session) handleEvent(rawEvt any) {
 		// pushname pode não ter chegado ainda (SendPresence -> ErrNoPushName);
 		// nesse caso o reenvio ocorre no evento PushNameSetting abaixo.
 		go s.keepPresenceActive(ctx)
+		s.refreshMessageCappingSoon(15 * time.Second)
+	case *events.AppStateSyncComplete:
+		// Pareamento novo: o pushname real só chega no full sync do
+		// critical_block, que não emite PushNameSetting.
+		if evt.Name == appstate.WAPatchCriticalBlock {
+			go s.keepPresenceActive(ctx)
+		}
 	case *events.PushNameSetting:
 		// O pushname chegou (às vezes depois do Connected): reenvia a presença,
 		// pois SendPresence falha enquanto o nome não está no store.
@@ -781,8 +777,11 @@ func (s *Session) handleEvent(rawEvt any) {
 		// Restrição/time-lock (shadow-ban 463): o WhatsApp limita o alcance do número
 		// (mensagem/chamada "somem" em silêncio). Único sinal programático da restrição.
 		go s.handleReachoutTimelock(evt)
+		s.refreshMessageCappingSoon(2 * time.Second)
 	case *events.Message:
 		switch {
+		case isMetaAIEvent(evt):
+			s.handleMetaAIEvent(evt) // conversa com a Meta AI: fora do Chatwoot/webhook
 		case evt.Message.GetPollUpdateMessage() != nil:
 			go s.handleIncomingPollVote(evt) // voto em enquete (decodifica + encaminha)
 		case evt.Message.GetEncEventResponseMessage() != nil:
@@ -1037,6 +1036,7 @@ func (s *Session) info() SessionInfo {
 	extPass := s.SIPExtPass
 	extDest := s.SIPExtDest
 	extProxy := s.SIPExtProxy
+	inboundMode := s.SIPAgent.mode()
 	extStatus := s.sipExtStatus
 	extErr := s.sipExtError
 	s.mu.Unlock()
@@ -1046,7 +1046,7 @@ func (s *Session) info() SessionInfo {
 		SIPUser: s.SIPUser, SIPPass: s.SIPPass, SIPURL: s.SIPURL,
 		SIPExtEnabled: extEnabled, SIPExtHost: extHost, SIPExtPort: extPort,
 		SIPExtUser: extUser, SIPExtPass: extPass, SIPExtDest: extDest, SIPExtProxy: extProxy,
-		SIPExtStatus: extStatus, SIPExtError: extErr,
+		SIPExtStatus: extStatus, SIPExtError: extErr, SIPExtInboundMode: inboundMode,
 	}
 }
 
@@ -1225,6 +1225,39 @@ type sipExtConfig struct {
 	Pass    string
 	Dest    string
 	Proxy   string // outbound proxy (host[:porta]); vazio = usa Host
+	Agent   sipAgentOpts
+}
+
+// Modos do INVITE entrante (campo inboundMode da config SIP da sessão).
+const (
+	sipInboundOriginate = "originate" // padrão: disca no WhatsApp p/ o número do Request-URI
+	sipInboundAgent     = "agent"     // atende e entrega ao agente de voz (SSE + WS pcm16)
+	sipInboundAuto      = "auto"      // agent se ligaram p/ o próprio ramal; senão originate
+)
+
+// sipAgentOpts é a config do modo agente (persistida como JSON em sip_ext_opts).
+type sipAgentOpts struct {
+	InboundMode string `json:"inboundMode,omitempty"`
+	AutoAnswer  bool   `json:"agentAutoAnswer,omitempty"`
+	RingTimeout int    `json:"agentRingTimeoutSeconds,omitempty"`
+}
+
+func (o sipAgentOpts) mode() string {
+	switch o.InboundMode {
+	case sipInboundAgent, sipInboundAuto:
+		return o.InboundMode
+	}
+	return sipInboundOriginate
+}
+
+func (o sipAgentOpts) ringTimeout() time.Duration {
+	if o.RingTimeout > 0 {
+		return time.Duration(o.RingTimeout) * time.Second
+	}
+	if ringTimeoutSecs > 0 {
+		return time.Duration(ringTimeoutSecs) * time.Second
+	}
+	return 60 * time.Second
 }
 
 func (s *Session) sipExtSnapshot() sipExtConfig {
@@ -1233,6 +1266,7 @@ func (s *Session) sipExtSnapshot() sipExtConfig {
 	return sipExtConfig{
 		Enabled: s.SIPExtEnabled, Host: s.SIPExtHost, Port: s.SIPExtPort,
 		User: s.SIPExtUser, Pass: s.SIPExtPass, Dest: s.SIPExtDest, Proxy: s.SIPExtProxy,
+		Agent: s.SIPAgent,
 	}
 }
 
@@ -1245,6 +1279,7 @@ func (s *Session) setSIPExt(c sipExtConfig) {
 	s.SIPExtPass = c.Pass
 	s.SIPExtDest = c.Dest
 	s.SIPExtProxy = c.Proxy
+	s.SIPAgent = c.Agent
 	s.mu.Unlock()
 }
 
@@ -1253,6 +1288,16 @@ func (s *Session) setSIPExtStatus(state, errMsg string) {
 	s.sipExtStatus = state
 	s.sipExtError = errMsg
 	s.mu.Unlock()
+}
+
+// activeCallCount soma as chamadas WhatsApp e as do modo agente SIP da sessão
+// (as duas dividem o limite WACALLS_MAX_CALLS).
+func (s *Session) activeCallCount() int {
+	n := s.reg.count()
+	if s.mgr != nil && s.mgr.sipAgentCount != nil {
+		n += s.mgr.sipAgentCount(s.id)
+	}
+	return n
 }
 
 func (s *Session) terminateCallByID(callID string) {
