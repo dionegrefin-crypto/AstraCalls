@@ -368,6 +368,34 @@ Automatize o WhatsApp no **n8n sem escrever código**: o node oficial [`n8n-node
 - **Pronto para responder:** o gatilho entrega `de`, `nome`, `texto` e `responderPara` prontos para usar no envio, e ignora as mensagens da própria conta (sem loop).
 - **Agentes de IA:** o node pode ser usado como ferramenta pelos agentes de IA do n8n.
 
+## 🤖 MCP para agentes de IA
+
+O AstraCalls traz um **servidor MCP** (Model Context Protocol) embutido: Claude, ChatGPT, Cursor,
+VS Code, n8n e outros agentes de IA usam o WhatsApp direto, sem instalar nada.
+
+**Chaves por sessão (recomendado):** no painel, botão **MCP** da sessão → **Nova chave**. A chave fica
+presa àquele número, pode ser **somente leitura** e é revogada a qualquer momento. Ela não permite
+parear, desconectar nem mexer em webhooks, Chatwoot, SIP ou proxy. O painel mostra, uma única vez, a
+URL e as configurações prontas para copiar. Pela API:
+`GET/POST /api/sessions/{sid}/mcp-keys` e `DELETE /api/sessions/{sid}/mcp-keys/{id}`.
+
+| Cliente | Como conectar |
+|---|---|
+| claude.ai, ChatGPT (conector personalizado) | URL `https://SEU-ASTRACALLS/mcp/<chave>` |
+| Claude Code | `claude mcp add --transport http astracalls https://SEU-ASTRACALLS/mcp --header "Authorization: Bearer <chave>"` |
+| Claude Desktop, Cursor, VS Code | `mcpServers` → `{"type":"http","url":"https://SEU-ASTRACALLS/mcp","headers":{"Authorization":"Bearer <chave>"}}` |
+| n8n | Ferramenta **MCP Client** do agente de IA, endereço `/mcp` e autenticação *Bearer* |
+
+**Acesso de administrador:** `https://SEU-ASTRACALLS/api/mcp` com a API Key da instância
+(`WACALLS_API_KEY`) enxerga todas as sessões; o agente escolhe o número por nome, telefone ou ID.
+
+**44 ferramentas:** enviar texto, mídia, documento, localização, contato, enquete, botões e lista;
+reagir, editar, apagar, marcar como lida e "digitando…"; **ler conversas e buscar mensagens**; ligar,
+encerrar, toque fantasma e disparo de ligações; contatos, grupos e comunidades; limite de conversas
+novas e restrição; e `api_request` para as demais rotas da sessão.
+
+> Quem tem a chave usa o número: trate-a como senha e revogue as que não usa mais.
+
 ---
 
 ## 🧪 Testes

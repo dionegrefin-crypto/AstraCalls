@@ -2,6 +2,73 @@
 
 Todas as mudanças relevantes do AstraCalls.
 
+## v1.1.5 — 2026-11-03
+
+Versão **urgente de conexão**: desde 02/11 o WhatsApp recusa clientes com versão antiga
+(`Client outdated (405)`) e a sessão não volta depois de um reinício ou queda. Esta versão
+atualiza o protocolo e evita a desconexão. **Atualize antes de reiniciar o servidor.** Traz
+também o **servidor MCP** para agentes de IA e várias correções da telefonia SIP com PABX
+(Asterisk/3CX).
+
+### 🔌 Conexão
+
+- **whatsmeow de 02/11/2026** (protocolo `2.3000.1052556849`): corrige o
+  `Client outdated (405)`. As sessões reconectam sem novo QR code.
+- Lista de bloqueados (`GET /blocklist`) adaptada ao novo formato do WhatsApp (LID + telefone);
+  devolve o telefone quando disponível.
+
+### 🤖 MCP — agentes de IA
+
+- **Servidor MCP embutido** (`/api/mcp`, Streamable HTTP) com 44 ferramentas: enviar
+  mensagens, ler e buscar conversas, ligar, contatos, grupos, comunidades, limite de
+  envio/restrição e `api_request`. Conecta Claude, ChatGPT, Cursor, n8n e outros.
+- **Chaves MCP por sessão** (até 20), criadas pelo botão **MCP** do painel ou por
+  `/api/sessions/{sid}/mcp-keys`: o agente enxerga só aquele número, sem acesso a parear,
+  desconectar, webhooks, Chatwoot ou SIP. Opção **somente leitura**. A chave aparece uma
+  única vez e pode ser revogada; conecta em `/mcp` (Bearer) ou `/mcp/{chave}`.
+- A API key também é aceita em `Authorization: Bearer`.
+
+### ☎️ Telefonia SIP
+
+- **Auth ID (3CX):** campo opcional "Usuário de autenticação" no registro em PABX externo,
+  separado do ramal (`authUser` em `/sip-ext`).
+- **Várias sessões no mesmo PABX:** o cabeçalho `X-AstraCalls-Ramal` no INVITE escolhe por
+  qual número de WhatsApp a ligação sai (no Asterisk, `PJSIP_HEADER(add,...)` no `Dial`).
+- **Recusa no ramal encerra no WhatsApp:** 486/603 do ramal agora recusa a chamada no
+  WhatsApp; antes o ramal parava de tocar e o celular de quem ligou seguia chamando.
+- **Liga de volta e cai em ~30 s:** o re-INVITE do PABX na chamada recebida era tratado como
+  ligação nova, discava para quem ligou e derrubava a chamada.
+- **Painel e widget param de tocar** quando o ramal atende (antes ficavam em "tocando" e o
+  Atender dava `call cannot be accepted in state active`).
+- **DID no Asterisk:** com o registro em Contact `s@host`, a ligação do WhatsApp passa a
+  chegar com o número da sessão como DID, permitindo separar as linhas no dialplan.
+
+### 🐞 Correções
+
+- **Áudio mudo do contato:** quando o aceite da chamada trazia outra chave, a chave de
+  recepção era sobrescrita e o áudio de quem ligou virava silêncio. Agora o fim de cada
+  chamada registra um resumo de mídia (pacotes, erros SRTP, nível do áudio) para diagnóstico.
+- **Chatwoot com mesma conta em instalações diferentes:** widget e botão de ligar não se
+  misturam mais entre dois Chatwoot com o mesmo número de conta.
+- Painel: a tela da chave MCP não estoura a largura do modal.
+
+## v1.1.4 — 2026-10-24
+
+Versão de **segurança**: atualiza o Go, o gateway SIP e as bibliotecas de rede para fechar
+todas as vulnerabilidades conhecidas nos pacotes do AstraCalls. Recomendada para todos,
+principalmente para quem usa a telefonia SIP com a porta exposta na internet.
+
+### 🔒 Segurança
+
+- **Go 1.26.10** (antes 1.26.4): corrige 20 vulnerabilidades da biblioteca padrão
+  alcançáveis pelo AstraCalls — HTTP/1 e HTTP/2 (`net/http`), TLS e certificados
+  (`crypto/tls`, `crypto/x509`), cabeçalhos MIME, `net/url`, `encoding/xml` e `encoding/asn1`.
+- **Gateway SIP (sipgo 1.4.3):** corrige duas falhas que permitiam derrubar o serviço com
+  pacotes SIP malformados (`Content-Length` e frames WebSocket sem validação).
+- **golang.org/x/net 0.60** e **golang.org/x/crypto 0.57**: correções de HTTP/2 e criptografia.
+- **Painel:** dependências de build atualizadas (vite, postcss, nanoid).
+- Resultado: `govulncheck` e `npm audit` sem nenhuma vulnerabilidade.
+
 ## v1.1.3 — 2026-10-23
 
 A versão da **telefonia SIP** e dos **webhooks múltiplos**: o PABX passa a falar com o
